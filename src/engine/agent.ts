@@ -1,147 +1,228 @@
-// ── Agentic loop - the core of mikro ──
 import type { Message, ToolCall } from "./types";
+import { uid } from "./uid";
 import { generate } from "./llm";
-import { getToolsForPrompt, findTool } from "./tools";
+import { toolsPrompt, findTool, tools } from "./tools";
 
-const SYSTEM_PROMPT = `You are mikro, a minimal but capable coding agent running entirely in the browser.
-You have access to a virtual Linux sandbox with a filesystem and shell commands.
+const TOOL_NAMES = new Set(tools.map((t) => t.name));
 
-Available tools:
-${getToolsForPrompt()}
+// Dynamic system prompt — built fresh each call with date + online status
+function buildSystem(): string {
+  const now = new Date();
+  const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  const online = navigator.onLine;
 
-To use a tool, respond with a tool_call block:
-<tool_call>
-{"name": "tool_name", "arguments": {"param": "value"}}
-</tool_call>
+  return `MikroOS. agent. /workspace. lifo virtual OS. ${date}. ${online ? "online" : "OFFLINE"}.
 
-You can make multiple tool calls in one response. After each tool call, you will receive the result and can continue.
+NO npm/npx/node. packages: bash("lifo install <pkg>").
+${online ? "online: CDN ok (unpkg/esm.sh). search/web_fetch work." : "OFFLINE: no CDN, no search, no web. write fully self-contained html."}
+preview(path) renders html in UI.
 
-Rules:
-- Think step by step before acting
-- Use bash for complex operations (piping, chaining commands)
-- Use read/write/edit for file operations
-- Use grep/glob to search the codebase
-- Use web_search when you need current information
-- Be concise in your responses
-- When you're done with a task, summarize what you did
-- Files live under /home/user/ by default`;
+${toolsPrompt()}
 
-function uid(): string {
-  return Math.random().toString(36).slice(2, 10);
+call: {"tool":"name","param":"value"}
+search skill → open → follow → write files → preview.
+prefer offline html (inline css/js). use CDN only if specifically asked.
+no thinking. just tool calls.`;
 }
 
-function parseToolCalls(text: string): ToolCall[] {
-  const calls: ToolCall[] = [];
-  const re = /<tool_call>\s*(\{[\s\S]*?\})\s*<\/tool_call>/g;
-  let m;
-  while ((m = re.exec(text))) {
-    try {
-      const parsed = JSON.parse(m[1]);
-      calls.push({
-        id: uid(),
-        name: parsed.name,
-        arguments: parsed.arguments || {},
-      });
-    } catch {
-      // skip malformed
+// Few-shot: search → open → write → preview. Concise.
+const FEW_SHOT: Array<{ role: "user" | "assistant"; content: string }> = [
+  { role: "user", content: "make a simple app" },
+  { role: "assistant", content: '{"tool":"search","query":"site"}' },
+  { role: "user", content: "skills:\n  site - Static HTML + CSS + JS website (open to learn how)" },
+  { role: "assistant", content: '{"tool":"open","target":"site"}' },
+  { role: "user", content: "# Static Site\nCreate in /workspace:\n## index.html\n...\n## style.css\n...\nWrite each file." },
+  { role: "assistant", content: '{"tool":"write","path":"/workspace/index.html","content":"<!DOCTYPE html><html><head><link rel=\\"stylesheet\\" href=\\"style.css\\"></head><body><h1>App</h1></body></html>"}' },
+  { role: "user", content: "Written: /workspace/index.html" },
+  { role: "assistant", content: '{"tool":"write","path":"/workspace/style.css","content":"body{margin:2rem;font-family:sans-serif;background:#111;color:#eee}"}' },
+  { role: "user", content: "Written: /workspace/style.css" },
+  { role: "assistant", content: '{"tool":"preview","path":"/workspace/index.html"}' },
+  { role: "user", content: "__PREVIEW__<!DOCTYPE html>..." },
+  { role: "assistant", content: "done. 2 files created." },
+];
+
+// Parse tool calls: {"tool":"name",...} or legacy {"name":"x","arguments":{}}
+export function parseToolCalls(text: string): ToolCall[] {
+  const out: ToolCall[] = [];
+
+  // Find {"tool": ...} objects by brace-depth
+  for (const re of [/\{\s*"tool"\s*:/g, /\{\s*"name"\s*:/g]) {
+    if (out.length) break; // first format wins
+    const starts = [...text.matchAll(re)];
+    for (const start of starts) {
+      const sub = text.slice(start.index!);
+      let depth = 0, end = -1;
+      for (let i = 0; i < sub.length; i++) {
+        if (sub[i] === "{") depth++;
+        else if (sub[i] === "}") { depth--; if (depth === 0) { end = i; break; } }
+      }
+      if (end < 0) continue;
+      try {
+        const obj = JSON.parse(sub.slice(0, end + 1));
+        // New format: {"tool":"bash","command":"ls"}
+        if (obj.tool && TOOL_NAMES.has(obj.tool)) {
+          const { tool: _, ...args } = obj;
+          out.push({ id: uid(), name: obj.tool, args });
+        }
+        // Legacy: {"name":"bash","arguments":{"command":"ls"}}
+        else if (obj.name && TOOL_NAMES.has(obj.name)) {
+          out.push({ id: uid(), name: obj.name, args: obj.arguments || {} });
+        }
+      } catch { /* skip */ }
     }
   }
-  return calls;
+  return out;
 }
 
-function stripToolCalls(text: string): string {
-  return text.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "").trim();
+export function stripToolCalls(text: string): string {
+  let s = text;
+  for (const re of [/\{\s*"tool"\s*:/g, /\{\s*"name"\s*:/g]) {
+    const starts = [...s.matchAll(re)];
+    for (let i = starts.length - 1; i >= 0; i--) {
+      const sub = s.slice(starts[i].index!);
+      let depth = 0, end = -1;
+      for (let j = 0; j < sub.length; j++) {
+        if (sub[j] === "{") depth++;
+        else if (sub[j] === "}") { depth--; if (depth === 0) { end = j; break; } }
+      }
+      if (end >= 0) {
+        try {
+          const obj = JSON.parse(sub.slice(0, end + 1));
+          if ((obj.tool && TOOL_NAMES.has(obj.tool)) || (obj.name && TOOL_NAMES.has(obj.name)))
+            s = s.slice(0, starts[i].index!) + s.slice(starts[i].index! + end + 1);
+        } catch { /* not a tool call */ }
+      }
+    }
+  }
+  return s.trim();
+}
+
+const MAX_HISTORY = 12; // bigger models can use more context
+const MAX_RESULT_LEN = 3000;
+
+function toConv(msgs: Message[]) {
+  return msgs.slice(-MAX_HISTORY).map((m) =>
+    m.role === "tool"
+      ? { role: "user" as const, content: m.content }
+      : { role: m.role as "user" | "assistant", content: m.content }
+  );
 }
 
 export type OnMessage = (msg: Message) => void;
 export type OnToken = (token: string) => void;
+export type OnReset = () => void;
 
 export async function runAgent(
-  userMessage: string,
+  text: string,
   history: Message[],
   onMessage: OnMessage,
-  onToken: OnToken
-): Promise<void> {
-  // Build conversation for LLM
-  const conv: Array<{ role: string; content: string }> = [
-    { role: "system", content: SYSTEM_PROMPT },
+  onToken: OnToken,
+  onReset?: OnReset,
+) {
+  const conv = [
+    { role: "system" as const, content: buildSystem() },
+    ...FEW_SHOT,
+    ...toConv(history),
+    { role: "user" as const, content: text },
   ];
 
-  // Add history (last 20 messages for context window)
-  const recent = history.slice(-20);
-  for (const msg of recent) {
-    if (msg.role === "tool") {
-      conv.push({ role: "user", content: `<tool_response id="${msg.toolCallId}">\n${msg.content}\n</tool_response>` });
-    } else {
-      conv.push({ role: msg.role, content: msg.content });
-    }
-  }
+  let lastCallSig = "";
+  let repeatCount = 0;
 
-  // Add the new user message
-  conv.push({ role: "user", content: userMessage });
+  for (let i = 0; i < 15; i++) {
+    const response = await generate(conv, onToken);
+    const calls = parseToolCalls(response);
+    const content = stripToolCalls(response);
 
-  // Agentic loop - keep going while model makes tool calls
-  const MAX_ITERATIONS = 10;
-  for (let i = 0; i < MAX_ITERATIONS; i++) {
-    let fullText = "";
-    const response = await generate(conv, (token) => {
-      fullText += token;
-      onToken(token);
-    });
-
-    const toolCalls = parseToolCalls(response);
-    const textContent = stripToolCalls(response);
-
-    // Emit assistant message
-    const assistantMsg: Message = {
-      id: uid(),
-      role: "assistant",
-      content: textContent,
-      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-      timestamp: Date.now(),
-    };
-    onMessage(assistantMsg);
-
-    // If no tool calls, we're done
-    if (toolCalls.length === 0) break;
-
-    // Execute tools and feed results back
-    for (const call of toolCalls) {
-      const tool = findTool(call.name);
-      let result: string;
-      if (tool) {
-        try {
-          result = await tool.execute(call.arguments);
-        } catch (e: any) {
-          result = `Error: ${e.message}`;
-        }
-      } else {
-        result = `Unknown tool: ${call.name}`;
-      }
-
-      // Truncate very long results
-      if (result.length > 4000) {
-        result = result.slice(0, 4000) + "\n... (truncated)";
-      }
-
-      const toolMsg: Message = {
-        id: uid(),
-        role: "tool",
-        content: result,
-        toolCallId: call.id,
-        timestamp: Date.now(),
-      };
-      onMessage(toolMsg);
-
-      // Add to conversation
+    // Auto-correct: malformed tool call (has "tool": but failed to parse)
+    if (!calls.length && /"tool"\s*:/.test(response)) {
       conv.push({ role: "assistant", content: response });
-      conv.push({
-        role: "user",
-        content: `<tool_response id="${call.id}" tool="${call.name}">\n${result}\n</tool_response>`,
-      });
+      conv.push({ role: "user", content: 'malformed tool call. correct format: {"tool":"name","param":"value"}' });
+      onReset?.();
+      continue;
     }
 
-    // Reset token stream for next iteration
-    onToken("\n");
+    // Dedup: same tool call repeated = stuck
+    if (calls.length) {
+      const sig = JSON.stringify(calls.map((c) => ({ n: c.name, a: c.args })));
+      if (sig === lastCallSig) {
+        repeatCount++;
+        if (repeatCount >= 2) {
+          onMessage({ id: uid(), role: "assistant", content: content || "stopped (repeating same action).", timestamp: Date.now() });
+          break;
+        }
+        conv.push({ role: "assistant", content: response });
+        conv.push({ role: "user", content: "you already did this. next step or say done." });
+        onReset?.();
+        continue;
+      }
+      lastCallSig = sig;
+      repeatCount = 0;
+    }
+
+    onMessage({ id: uid(), role: "assistant", content, toolCalls: calls.length ? calls : undefined, timestamp: Date.now() });
+    if (!calls.length) break;
+
+    conv.push({ role: "assistant", content: response });
+
+    for (const call of calls) {
+      const tool = findTool(call.name);
+      let result = tool
+        ? await tool.execute(call.args).catch((e: Error) => `Error: ${e.message}`)
+        : `Unknown tool: ${call.name}`;
+      if (result.length > MAX_RESULT_LEN) result = result.slice(0, MAX_RESULT_LEN) + "...(truncated)";
+
+      onMessage({ id: uid(), role: "tool", content: result, toolCallId: call.id, timestamp: Date.now() });
+      conv.push({ role: "user", content: result });
+    }
+
+    onReset?.();
   }
+}
+
+// Subagent: fresh context, shared sandbox.
+export async function runSubAgent(task: string): Promise<string> {
+  const { toolsPrompt: tp, findTool: ft } = await import("./tools");
+
+  const subSys = `you are a subagent. write files in /workspace using tools.
+tools: ${tp()}
+format: {"tool":"name","param":"value"}
+write the file, then say done.`;
+
+  const conv: Array<{ role: string; content: string }> = [
+    { role: "system", content: subSys },
+    { role: "user", content: "write index.html with hello" },
+    { role: "assistant", content: '{"tool":"write","path":"/workspace/index.html","content":"<html><body>Hello</body></html>"}' },
+    { role: "user", content: "Written: /workspace/index.html" },
+    { role: "assistant", content: "done." },
+    { role: "user", content: task },
+  ];
+
+  const results: string[] = [];
+
+  for (let i = 0; i < 8; i++) {
+    const response = await generate(conv, () => {});
+    const calls = parseToolCalls(response);
+    const content = stripToolCalls(response);
+
+    if (!calls.length) {
+      if (content) results.push(content);
+      break;
+    }
+
+    conv.push({ role: "assistant", content: response });
+
+    for (const call of calls) {
+      const tool = ft(call.name);
+      let result = tool
+        ? await tool.execute(call.args).catch((e: Error) => `Error: ${e.message}`)
+        : `Unknown tool: ${call.name}`;
+      if (result.length > 2000) result = result.slice(0, 2000) + "...(truncated)";
+
+      results.push(`${call.name}: ${result.slice(0, 300)}`);
+      conv.push({ role: "user", content: result });
+    }
+  }
+
+  return results.join("\n") || "subagent: no output.";
 }

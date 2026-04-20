@@ -1,100 +1,78 @@
-// ── Persistent store for threads/messages ──
 import { createSignal, createRoot } from "solid-js";
 import { createStore, produce } from "solid-js/store";
-import type { Thread, Message, LLMStatus } from "./types";
+import type { Thread, Message, LLMState } from "./types";
+import { uid } from "./uid";
+import { DEFAULT_MODEL } from "./models";
 
-function uid(): string {
-  return Math.random().toString(36).slice(2, 10);
-}
+const load = (): Thread[] => {
+  try { return JSON.parse(localStorage.getItem("mikro:threads") || "[]"); }
+  catch { return []; }
+};
 
-function loadThreads(): Thread[] {
-  try {
-    const raw = localStorage.getItem("mikro:threads");
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
+function create() {
+  const [threads, setThreads] = createStore<Thread[]>(load());
+  const [activeId, setActiveId] = createSignal<string | null>(threads[0]?.id ?? null);
+  const [llmState, setLLMState] = createSignal<LLMState>("idle");
+  const [llmMsg, setLLMMsg] = createSignal("");
+  const [llmProgress, setLLMProgress] = createSignal(0);
+  const [generating, setGenerating] = createSignal(false);
+  const [stream, setStream] = createSignal("");
+  const [autowork, setAutowork] = createSignal(false);
+  const [temperature, setTemperature] = createSignal(0.6);
+  const [modelId, setModelId] = createSignal(DEFAULT_MODEL.id);
+  const [setupDone, _setSetupDone] = createSignal(localStorage.getItem("mikro:setup") === "1");
+  const setSetupDone = (v: boolean) => {
+    _setSetupDone(v);
+    if (v) localStorage.setItem("mikro:setup", "1");
+    else localStorage.removeItem("mikro:setup");
+  };
 
-function saveThreads(threads: Thread[]) {
-  localStorage.setItem("mikro:threads", JSON.stringify(threads));
-}
+  const save = () => localStorage.setItem("mikro:threads", JSON.stringify([...threads]));
 
-function createAppStore() {
-  const [threads, setThreads] = createStore<Thread[]>(loadThreads());
-  const [activeThreadId, setActiveThreadId] = createSignal<string | null>(
-    threads.length > 0 ? threads[0].id : null
-  );
-  const [llmStatus, setLLMStatus] = createSignal<LLMStatus>({ state: "idle" });
-  const [isGenerating, setIsGenerating] = createSignal(false);
-  const [streamText, setStreamText] = createSignal("");
+  const active = () => threads.find((t) => t.id === activeId());
 
-  function persist() {
-    saveThreads([...threads]);
-  }
-
-  function createThread(): string {
+  function newThread() {
     const id = uid();
-    const thread: Thread = {
-      id,
-      title: "New chat",
-      messages: [],
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-    setThreads(produce((t) => t.unshift(thread)));
-    setActiveThreadId(id);
-    persist();
+    setThreads(produce((t) => t.unshift({ id, title: "New chat", messages: [], createdAt: Date.now() })));
+    setActiveId(id);
+    save();
     return id;
   }
 
   function addMessage(threadId: string, msg: Message) {
-    setThreads(
-      produce((threads) => {
-        const t = threads.find((t) => t.id === threadId);
-        if (!t) return;
-        t.messages.push(msg);
-        t.updatedAt = Date.now();
-        // Auto-title from first user message
-        if (t.title === "New chat" && msg.role === "user") {
-          t.title = msg.content.slice(0, 50) + (msg.content.length > 50 ? "..." : "");
-        }
-      })
-    );
-    persist();
+    setThreads(produce((all) => {
+      const t = all.find((x) => x.id === threadId);
+      if (!t) return;
+      t.messages.push(msg);
+      if (t.title === "New chat" && msg.role === "user")
+        t.title = msg.content.slice(0, 40) + (msg.content.length > 40 ? "..." : "");
+    }));
+    save();
   }
 
   function deleteThread(id: string) {
-    setThreads(produce((t) => {
-      const idx = t.findIndex((x) => x.id === id);
-      if (idx >= 0) t.splice(idx, 1);
-    }));
-    if (activeThreadId() === id) {
-      setActiveThreadId(threads.length > 0 ? threads[0].id : null);
-    }
-    persist();
+    setThreads(produce((t) => { const i = t.findIndex((x) => x.id === id); if (i >= 0) t.splice(i, 1); }));
+    if (activeId() === id) setActiveId(threads[0]?.id ?? null);
+    save();
   }
 
-  function getActiveThread(): Thread | undefined {
-    return threads.find((t) => t.id === activeThreadId());
+  function nukeAll() {
+    setThreads([]);
+    setActiveId(null);
+    localStorage.clear();
+    _setSetupDone(false);
   }
 
   return {
-    threads,
-    activeThreadId,
-    setActiveThreadId,
-    llmStatus,
-    setLLMStatus,
-    isGenerating,
-    setIsGenerating,
-    streamText,
-    setStreamText,
-    createThread,
-    addMessage,
-    deleteThread,
-    getActiveThread,
+    threads, activeId, setActiveId, active,
+    llmState, setLLMState, llmMsg, setLLMMsg, llmProgress, setLLMProgress,
+    generating, setGenerating, stream, setStream,
+    autowork, setAutowork,
+    temperature, setTemperature,
+    modelId, setModelId,
+    setupDone, setSetupDone,
+    newThread, addMessage, deleteThread, nukeAll,
   };
 }
 
-// Singleton store
-export const store = createRoot(createAppStore);
+export const store = createRoot(create);

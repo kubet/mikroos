@@ -1,5 +1,3 @@
-// ── Core types for mikro engine ──
-
 export interface Message {
   id: string;
   role: "user" | "assistant" | "tool";
@@ -12,26 +10,14 @@ export interface Message {
 export interface ToolCall {
   id: string;
   name: string;
-  arguments: Record<string, unknown>;
-}
-
-export interface ToolResult {
-  toolCallId: string;
-  content: string;
-  error?: boolean;
+  args: Record<string, unknown>;
 }
 
 export interface Tool {
   name: string;
+  params: string; // e.g. "path,content" — just the param names
   description: string;
-  parameters: Record<string, ToolParam>;
-  required: string[];
   execute: (args: Record<string, unknown>) => Promise<string>;
-}
-
-export interface ToolParam {
-  type: string;
-  description: string;
 }
 
 export interface Thread {
@@ -39,11 +25,6 @@ export interface Thread {
   title: string;
   messages: Message[];
   createdAt: number;
-  updatedAt: number;
 }
 
-export interface LLMStatus {
-  state: "idle" | "loading" | "ready" | "generating" | "error";
-  progress?: number;
-  message?: string;
-}
+export type LLMState = "idle" | "loading" | "ready" | "generating" | "error";

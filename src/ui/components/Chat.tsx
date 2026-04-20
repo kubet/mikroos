@@ -1,156 +1,190 @@
-import { For, Show, createSignal, createEffect } from "solid-js";
+import { For, Show, createSignal, createEffect, createMemo } from "solid-js";
+import { marked } from "marked";
 import { store } from "../../engine/store";
 import { runAgent } from "../../engine/agent";
+import { orchestrate } from "../../engine/orchestrator";
 import { stopGeneration } from "../../engine/llm";
-import type { Message } from "../../engine/types";
+import { uid } from "../../engine/uid";
 import MessageView from "./MessageView";
 
-export default function Chat() {
+marked.setOptions({ breaks: true, gfm: true });
+
+function cleanStream(text: string): string {
+  let clean = text;
+  const re = /\{\s*"tool"\s*:[^}]*(?:\{[^}]*\}[^}]*)?\}/g;
+  clean = clean.replace(re, "");
+  clean = clean.replace(/\{\s*"tool"\s*:[^}]*$/s, "");
+  clean = clean.replace(/\{\s*"name"\s*:[^}]*(?:\{[^}]*\}[^}]*)?\}/g, "");
+  clean = clean.replace(/\{\s*"name"\s*:[^}]*$/s, "");
+  return clean.trim();
+}
+
+export default function Chat(props: { onMenu?: () => void }) {
   const [input, setInput] = createSignal("");
-  let messagesEnd: HTMLDivElement | undefined;
-  let inputRef: HTMLTextAreaElement | undefined;
+  let bottom: HTMLDivElement | undefined;
+  let textarea: HTMLTextAreaElement | undefined;
 
-  const thread = () => store.getActiveThread();
-  const messages = () => thread()?.messages ?? [];
+  const msgs = () => store.active()?.messages ?? [];
 
-  // Auto-scroll on new messages
-  createEffect(() => {
-    messages().length; // track
-    store.streamText(); // track
-    messagesEnd?.scrollIntoView({ behavior: "smooth" });
+  const streamHtml = createMemo(() => {
+    const raw = store.stream();
+    if (!raw) return "";
+    const clean = cleanStream(raw);
+    if (!clean) return "";
+    return marked(clean) as string;
   });
 
-  // Focus input
-  createEffect(() => {
-    if (!store.isGenerating()) inputRef?.focus();
-  });
+  createEffect(() => { msgs().length; store.stream(); bottom?.scrollIntoView({ behavior: "smooth" }); });
+  createEffect(() => { if (!store.generating()) textarea?.focus(); });
 
   async function send() {
     const text = input().trim();
-    if (!text || store.isGenerating()) return;
+    if (!text || store.generating()) return;
 
-    // Ensure thread exists
-    let tid = store.activeThreadId();
-    if (!tid) tid = store.createThread();
-
-    // Add user message
-    const userMsg: Message = {
-      id: Math.random().toString(36).slice(2, 10),
-      role: "user",
-      content: text,
-      timestamp: Date.now(),
-    };
-    store.addMessage(tid, userMsg);
+    let tid = store.activeId() ?? store.newThread();
+    const historyBefore = [...(store.active()?.messages ?? [])];
+    store.addMessage(tid, { id: uid(), role: "user", content: text, timestamp: Date.now() });
     setInput("");
-    store.setIsGenerating(true);
-    store.setStreamText("");
+    store.setGenerating(true);
+    store.setStream("");
 
     try {
-      await runAgent(
-        text,
-        thread()!.messages,
-        (msg) => store.addMessage(tid!, msg),
-        (token) => store.setStreamText((prev) => prev + token)
-      );
+      let handled = false;
+      if (store.autowork()) {
+        handled = await orchestrate(
+          text, tid,
+          (msg) => store.addMessage(tid, msg),
+          (t) => store.setStream((s) => s + t),
+          () => store.setStream(""),
+        );
+      }
+      if (!handled) {
+        await runAgent(
+          text,
+          historyBefore,
+          (msg) => store.addMessage(tid, msg),
+          (t) => store.setStream((s) => s + t),
+          () => store.setStream(""),
+        );
+      }
     } catch (e: any) {
-      store.addMessage(tid, {
-        id: Math.random().toString(36).slice(2, 10),
-        role: "assistant",
-        content: `Error: ${e.message || e}`,
-        timestamp: Date.now(),
-      });
+      store.addMessage(tid, { id: uid(), role: "assistant", content: `Error: ${e.message || e}`, timestamp: Date.now() });
     }
-
-    store.setIsGenerating(false);
-    store.setStreamText("");
-  }
-
-  function onKeyDown(e: KeyboardEvent) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      send();
-    }
+    store.setGenerating(false);
+    store.setStream("");
   }
 
   return (
     <div class="flex flex-col flex-1 min-h-0">
-      {/* Messages */}
-      <div class="flex-1 overflow-y-auto">
-        <Show
-          when={thread()}
-          fallback={
-            <div class="flex items-center justify-center h-full text-text-dim">
-              <div class="text-center">
-                <div class="text-accent text-2xl font-bold mb-2">mikro</div>
-                <div class="text-xs">browser-native AI coding agent</div>
-                <div class="text-xs mt-1 text-text-dim">
-                  press + to start a new chat
-                </div>
+      {/* Mobile header */}
+      <div class="md:hidden flex items-center gap-3 px-4 py-3 bg-c1" style={{ "border-bottom": "2px solid var(--color-c2)" }}>
+        <button
+          onClick={props.onMenu}
+          class="text-xl leading-none"
+          style={{ color: "var(--color-accent)" }}
+        >///</button>
+        <span class="font-bold tracking-wider">MikroOS</span>
+      </div>
+
+      <div class="flex-1 min-h-0 overflow-y-auto" style={{ background: "var(--color-c0)" }}>
+        <Show when={store.active()} fallback={
+          <div class="flex items-center justify-center h-full text-center">
+            <div style={{ padding: "24px" }}>
+              <img
+                src="/mascot.png"
+                width={480}
+                height={320}
+                alt=""
+                style={{ margin: "0 auto 16px", display: "block" }}
+              />
+              <div
+                style={{
+                  "font-size": "48px",
+                  "line-height": "1",
+                  "letter-spacing": "3px",
+                  color: "var(--color-c3)",
+                  "font-weight": "bold",
+                }}
+              >
+                MikroOS
+              </div>
+              <div
+                class="uppercase tracking-widest"
+                style={{ "margin-top": "14px", color: "var(--color-accent)", "font-size": "13px" }}
+              >
+                browser-native AI coding agent
+              </div>
+              <div
+                style={{
+                  "margin-top": "28px",
+                  color: "color-mix(in srgb, var(--color-c3) 35%, transparent)",
+                  "font-size": "12px",
+                }}
+              >
+                press [+] or type below to begin
               </div>
             </div>
-          }
-        >
-          <For each={messages()}>
-            {(msg) => <MessageView message={msg} />}
-          </For>
+          </div>
+        }>
+          <For each={msgs()}>{(msg) => <MessageView message={msg} />}</For>
 
-          {/* Streaming indicator */}
-          <Show when={store.isGenerating() && store.streamText()}>
-            <div class="px-4 py-3 bg-agent-bg border-b border-border/30">
-              <div class="text-[10px] text-text-dim mb-1 uppercase tracking-wider">
-                mikro
-              </div>
-              <pre class="whitespace-pre-wrap break-words leading-relaxed text-text-dim">
-                {store.streamText()}
-              </pre>
+          <Show when={store.generating() && store.stream()}>
+            <div
+              class="px-4 md:px-8 py-4 md:py-5"
+              style={{ background: "var(--color-c0)", "border-bottom": "1px solid var(--color-c2)" }}
+            >
+              <Show when={streamHtml()} fallback={
+                <pre
+                  class="whitespace-pre-wrap break-words leading-relaxed"
+                  style={{ color: "color-mix(in srgb, var(--color-c3) 30%, transparent)", "font-size": "14px" }}
+                >{store.stream()}</pre>
+              }>
+                <div class="md" innerHTML={streamHtml()} />
+              </Show>
             </div>
           </Show>
 
-          <Show when={store.isGenerating() && !store.streamText()}>
-            <div class="px-4 py-3 text-text-dim text-xs animate-pulse">
-              thinking...
+          <Show when={store.generating() && !store.stream()}>
+            <div
+              class="px-4 md:px-8 py-4 md:py-5"
+              style={{ color: "color-mix(in srgb, var(--color-c3) 45%, transparent)" }}
+            >
+              <span class="pixel-blink">●</span> thinking<span class="pixel-blink">...</span>
             </div>
           </Show>
 
-          <div ref={messagesEnd} />
+          <div ref={bottom} />
         </Show>
       </div>
 
       {/* Input */}
-      <div class="border-t border-border p-3 bg-surface">
-        <div class="flex gap-2 items-end">
+      <div class="p-3 md:p-5 bg-c1" style={{ "border-top": "2px solid var(--color-c2)" }}>
+        <div class="flex gap-2 md:gap-3 items-stretch">
           <textarea
-            ref={inputRef}
+            ref={textarea}
+            data-testid="chat-input"
             value={input()}
             onInput={(e) => setInput(e.currentTarget.value)}
-            onKeyDown={onKeyDown}
-            disabled={store.isGenerating()}
-            placeholder={
-              store.llmStatus().state === "ready"
-                ? "ask mikro anything..."
-                : store.llmStatus().state === "loading"
-                  ? "loading model..."
-                  : "initializing..."
-            }
-            class="flex-1 bg-surface-2 border border-border rounded px-3 py-2 text-text resize-none outline-none focus:border-accent/50 transition-colors placeholder:text-text-dim/50 min-h-[40px] max-h-[120px]"
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+            disabled={store.generating()}
+            placeholder={store.llmState() === "ready" ? "ask MikroOS..." : "loading model..."}
+            class="flex-1 pixel-input"
+            style={{ "min-height": "48px", "max-height": "180px" }}
             rows={1}
           />
-          <Show when={store.isGenerating()}>
-            <button
-              onClick={() => stopGeneration()}
-              class="px-3 py-2 bg-red-500/20 text-red-400 rounded border border-red-500/30 hover:bg-red-500/30 transition-colors text-xs"
-            >
-              stop
-            </button>
-          </Show>
-          <Show when={!store.isGenerating()}>
+          <Show when={store.generating()} fallback={
             <button
               onClick={send}
-              disabled={!input().trim() || store.llmStatus().state !== "ready"}
-              class="px-3 py-2 bg-accent/20 text-accent rounded border border-accent/30 hover:bg-accent/30 transition-colors disabled:opacity-30 disabled:cursor-not-allowed text-xs"
-            >
-              send
-            </button>
+              disabled={!input().trim() || store.llmState() !== "ready"}
+              class="pixel-btn pixel-btn-primary shrink-0"
+              style={{ "min-width": "84px" }}
+            >send</button>
+          }>
+            <button
+              onClick={() => stopGeneration()}
+              class="pixel-btn pixel-btn-danger shrink-0"
+              style={{ "min-width": "84px" }}
+            >stop</button>
           </Show>
         </div>
       </div>

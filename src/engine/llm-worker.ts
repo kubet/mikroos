@@ -1,84 +1,201 @@
-// ── Web Worker for LLM inference ──
-// Runs Bonsai 1-bit model via @huggingface/transformers on WebGPU
+import { CreateMLCEngine, type MLCEngine, type ChatCompletionMessageParam } from "@mlc-ai/web-llm";
 
-import {
-  pipeline,
-  TextStreamer,
-  InterruptableStoppingCriteria,
-} from "@huggingface/transformers";
+let mlcEngine: MLCEngine | null = null;
+let tfEngine: any = null;
+let activeEngine: "webllm" | "transformers" | null = null;
+let currentModel = "";
+let temperature = 0.6;
+let aborted = false;
+let loadId = 0;
 
-const MODEL_ID = "onnx-community/Bonsai-1.7B-ONNX";
+// Set by main thread (navigator.gpu may not exist in workers on iOS Safari)
+let webgpuAvailable = !!(navigator as any).gpu;
 
-let generator: any = null;
-let stopping = new InterruptableStoppingCriteria();
+const post = (msg: any) => self.postMessage(msg);
 
-type Msg = { type: string; [k: string]: any };
-
-function post(msg: Msg) {
-  self.postMessage(msg);
+function timeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${label} timed out`)), ms)),
+  ]);
 }
 
-async function loadModel() {
-  post({ type: "status", state: "loading", message: "Downloading model..." });
+// ── Load web-llm (Qwen) ──
 
-  generator = await pipeline("text-generation", MODEL_ID, {
-    device: "webgpu",
-    dtype: "q1" as any,
-    progress_callback: (p: any) => {
-      if (p.status === "progress" && p.total) {
-        post({
-          type: "status",
-          state: "loading",
-          progress: Math.round((p.loaded / p.total) * 100),
-          message: `Downloading: ${p.file}`,
-        });
-      }
+async function loadWebLLM(mlcId: string, myId: number) {
+  mlcEngine = null; tfEngine = null;
+  mlcEngine = await CreateMLCEngine(mlcId, {
+    initProgressCallback: (p) => {
+      if (loadId !== myId) return;
+      const pct = Math.round(p.progress * 100);
+      post({ type: "status", state: "loading", progress: pct, message: `${mlcId} ${pct}%` });
     },
   });
+  if (loadId !== myId) return;
+  activeEngine = "webllm";
+  currentModel = mlcId;
+  post({ type: "status", state: "ready", message: mlcId });
+}
 
-  // Warmup pass - compiles WebGPU shaders
-  post({ type: "status", state: "loading", message: "Warming up WebGPU..." });
-  const warmup = generator.tokenizer("x");
-  await generator.model.generate({ ...warmup, max_new_tokens: 1 });
+// ── Load transformers.js (Bonsai) ──
 
-  post({ type: "status", state: "ready", message: "Ready" });
+async function loadTransformers(repo: string, dtype: string, wasmDtype: string | undefined, myId: number) {
+  mlcEngine = null; tfEngine = null;
+  const { pipeline } = await import("@huggingface/transformers");
+  const name = repo.split("/")[1];
+
+  // Use WebGPU if available (check both worker + main thread flag)
+  const workerHasGPU = !!(navigator as any).gpu;
+  const canWebGPU = workerHasGPU; // worker needs direct access to navigator.gpu
+  let device: "webgpu" | "wasm" = canWebGPU ? "webgpu" : "wasm";
+  let useDtype = device === "wasm" && wasmDtype ? wasmDtype : dtype;
+
+  post({ type: "status", state: "loading", message: `${name} (${device})...` });
+
+  try {
+    tfEngine = await pipeline("text-generation", repo, {
+      device, dtype: useDtype as any,
+      progress_callback: (p: any) => {
+        if (loadId !== myId) return;
+        if (p.status === "progress" && p.total) {
+          const pct = Math.round((p.loaded / p.total) * 100);
+          post({ type: "status", state: "loading", progress: pct, message: `${name} ${pct}%` });
+        }
+      },
+    });
+  } catch (e) {
+    // WebGPU failed → try WASM with compatible dtype
+    if (device === "webgpu" && wasmDtype) {
+      console.warn("[mikro] WebGPU failed, trying WASM:", e);
+      device = "wasm"; useDtype = wasmDtype;
+      post({ type: "status", state: "loading", message: `${name} (wasm)...` });
+      tfEngine = await pipeline("text-generation", repo, {
+        device: "wasm", dtype: wasmDtype as any,
+        progress_callback: (p: any) => {
+          if (loadId !== myId) return;
+          if (p.status === "progress" && p.total) {
+            const pct = Math.round((p.loaded / p.total) * 100);
+            post({ type: "status", state: "loading", progress: pct, message: `${name} ${pct}%` });
+          }
+        },
+      });
+    } else throw e;
+  }
+
+  if (loadId !== myId) return;
+  post({ type: "status", state: "loading", message: `${name} warming up...` });
+  await timeout(tfEngine.model.generate({ ...tfEngine.tokenizer("x"), max_new_tokens: 1 }), 45000, "warmup");
+
+  if (loadId !== myId) return;
+  activeEngine = "transformers";
+  currentModel = repo;
+  post({ type: "status", state: "ready", message: `${name} (${device})` });
+}
+
+// ── Load dispatcher ──
+
+async function load(engine: string, modelId: string, dtype?: string, wasmDtype?: string, _needsWebGPU?: boolean) {
+  // "none" = main thread took over, kill everything here
+  if (engine === "none") {
+    if (mlcEngine) { try { mlcEngine.unload(); } catch {} }
+    if (tfEngine) { try { tfEngine.dispose?.(); } catch {} }
+    mlcEngine = null; tfEngine = null; activeEngine = null; currentModel = "";
+    loadId++;
+    return;
+  }
+  if (currentModel === modelId && activeEngine) {
+    post({ type: "status", state: "ready", message: modelId.split("/").pop() });
+    return;
+  }
+  const myId = ++loadId;
+
+  if (mlcEngine) { try { mlcEngine.unload(); } catch {} }
+  if (tfEngine) { try { tfEngine.dispose?.(); } catch {} }
+  mlcEngine = null; tfEngine = null; activeEngine = null; currentModel = "";
+
+  try {
+    if (engine === "webllm") {
+      // web-llm needs WebGPU. Check main thread flag since worker might not have navigator.gpu
+      if (!webgpuAvailable) throw new Error("WebGPU not available. Try Bonsai 1.7B.");
+      try {
+        await loadWebLLM(modelId, myId);
+      } catch (e: any) {
+        const msg = e?.message || "";
+        if (msg.includes("Cache") || msg.includes("caches") || msg.includes("network") || msg.includes("Network"))
+          throw new Error("Browser blocked model download (caching restriction). Try Bonsai 1.7B or use Chrome desktop.");
+        throw e;
+      }
+    } else {
+      await loadTransformers(modelId, dtype || "q4", wasmDtype, myId);
+    }
+  } catch (e: any) {
+    if (loadId !== myId) return;
+    mlcEngine = null; tfEngine = null; activeEngine = null; currentModel = "";
+    const msg = e?.message || String(e);
+    console.error("[mikro] load failed:", msg);
+    post({ type: "error", message: msg.slice(0, 150) });
+  }
+}
+
+// ── Generate ──
+
+async function generateWebLLM(messages: ChatCompletionMessageParam[]) {
+  if (!mlcEngine) return post({ type: "error", message: "Model not loaded." });
+  aborted = false;
+  post({ type: "status", state: "generating" });
+  const stream = await mlcEngine.chat.completions.create({
+    messages, stream: true, temperature: temperature || 0, max_tokens: 4096, top_p: 0.9,
+  });
+  let text = "", inThink = false;
+  for await (const chunk of stream) {
+    if (aborted) break;
+    let delta = chunk.choices[0]?.delta?.content;
+    if (!delta) continue;
+    if (delta.includes("<think>")) inThink = true;
+    if (inThink) {
+      if (delta.includes("</think>")) { delta = delta.split("</think>").slice(1).join("</think>"); inThink = false; if (!delta) continue; }
+      else continue;
+    }
+    text += delta;
+    post({ type: "token", text: delta });
+  }
+  post({ type: "done", text });
+}
+
+async function generateTransformers(messages: Array<{ role: string; content: string }>) {
+  if (!tfEngine) return post({ type: "error", message: "Model not loaded." });
+  const { TextStreamer, InterruptableStoppingCriteria } = await import("@huggingface/transformers");
+  aborted = false;
+  const stopping = new InterruptableStoppingCriteria();
+  let text = "";
+  const streamer = new TextStreamer(tfEngine.tokenizer, {
+    skip_prompt: true, skip_special_tokens: true,
+    callback_function: (t: string) => { text += t; post({ type: "token", text: t }); },
+  });
+  post({ type: "status", state: "generating" });
+  await tfEngine(messages, {
+    max_new_tokens: 4096, do_sample: temperature > 0,
+    temperature: temperature || undefined, top_p: 0.9,
+    streamer, stopping_criteria: stopping,
+  });
+  post({ type: "done", text });
 }
 
 async function generate(messages: Array<{ role: string; content: string }>) {
-  if (!generator) {
-    post({ type: "error", message: "Model not loaded" });
-    return;
-  }
-
-  stopping = new InterruptableStoppingCriteria();
-  let fullText = "";
-
-  const streamer = new TextStreamer(generator.tokenizer, {
-    skip_prompt: true,
-    skip_special_tokens: true,
-    callback_function: (token: string) => {
-      fullText += token;
-      post({ type: "token", text: token });
-    },
-  });
-
   try {
-    post({ type: "status", state: "generating" });
-    await generator(messages, {
-      max_new_tokens: 2048,
-      do_sample: false,
-      streamer,
-      stopping_criteria: stopping,
-    });
-    post({ type: "done", text: fullText });
+    if (activeEngine === "webllm") await generateWebLLM(messages as ChatCompletionMessageParam[]);
+    else if (activeEngine === "transformers") await generateTransformers(messages);
+    else post({ type: "error", message: "No model loaded. Please click on SETTINGS to select one." });
   } catch (e: any) {
-    post({ type: "error", message: e.message });
+    if (!aborted) { console.error("[mikro] generate:", e); post({ type: "error", message: e?.message || String(e) }); }
   }
 }
 
-self.onmessage = async (e: MessageEvent<Msg>) => {
-  const { type } = e.data;
-  if (type === "load") await loadModel();
-  else if (type === "generate") await generate(e.data.messages);
-  else if (type === "stop") stopping.interrupt();
+self.onmessage = (e: MessageEvent) => {
+  const d = e.data;
+  if (d.type === "webgpu") webgpuAvailable = d.available;
+  else if (d.type === "load") load(d.engine, d.modelId, d.dtype, d.wasmDtype, d.needsWebGPU);
+  else if (d.type === "generate") generate(d.messages);
+  else if (d.type === "stop") { aborted = true; mlcEngine?.interruptGenerate(); }
+  else if (d.type === "temperature") temperature = d.value;
 };

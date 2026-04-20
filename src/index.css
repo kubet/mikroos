@@ -1,46 +1,200 @@
 @import "tailwindcss";
+@import "@xterm/xterm/css/xterm.css";
+
+@font-face {
+  font-family: 'Monocraft';
+  src: url('https://cdn.jsdelivr.net/gh/IdreesInc/Monocraft@main/dist/Monocraft-ttf/Monocraft.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+
+/*
+  MikroOS — warm dark base + one organic amber accent
+  c0  #1c1917  app bg
+  c1  #262220  surface
+  c2  #353130  dim border
+  c3  #c8c2ba  text
+  accent  #e8913a  amber highlight (selection / primary / focus / ready)
+  danger  #c64d3a  muted brick red (stop / nuke / error)
+*/
 
 @theme {
-  --color-bg: #0a0a0a;
-  --color-surface: #111111;
-  --color-surface-2: #1a1a1a;
-  --color-border: #2a2a2a;
-  --color-text: #e5e5e5;
-  --color-text-dim: #888888;
-  --color-accent: #22c55e;
-  --color-accent-dim: #16a34a;
-  --color-user-bg: #1a2332;
-  --color-agent-bg: #141414;
-  --color-tool-bg: #1a1a0a;
-  --font-mono: "SF Mono", "Cascadia Code", "Fira Code", monospace;
+  --color-c0: #1c1917;
+  --color-c1: #262220;
+  --color-c2: #353130;
+  --color-c3: #c8c2ba;
+  --color-accent: #e8913a;
+  --color-danger: #c64d3a;
+  --font-mono: 'Monocraft', monospace;
 }
 
 * {
   box-sizing: border-box;
+  border-radius: 0 !important;
+  image-rendering: pixelated;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
+  -webkit-font-smoothing: none;
+  -moz-osx-font-smoothing: auto;
+  font-smooth: never;
+  text-rendering: geometricPrecision;
 }
 
 html, body, #root {
   height: 100%;
   margin: 0;
   padding: 0;
-  background: var(--color-bg);
-  color: var(--color-text);
+  background: var(--color-c0);
+  color: var(--color-c3);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 18px;
+  letter-spacing: 0;
 }
 
-::-webkit-scrollbar {
-  width: 6px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-::-webkit-scrollbar-thumb {
-  background: var(--color-border);
-  border-radius: 3px;
+/* chunky 8-bit scrollbar — muted */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--color-c0); }
+::-webkit-scrollbar-thumb { background: var(--color-c2); }
+::-webkit-scrollbar-thumb:hover { background: var(--color-accent); }
+
+pre, code { font-family: var(--font-mono); font-size: 17px; }
+
+/* sharp pixel focus ring in amber */
+button:focus-visible, textarea:focus-visible, input:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 0;
 }
 
-pre, code {
+/* xterm — warm dark */
+.xterm { font-family: var(--font-mono) !important; padding: 8px; }
+.xterm-viewport { background: var(--color-c0) !important; }
+.xterm-screen { background: var(--color-c0) !important; }
+
+/* blocky pixel button — quiet default, amber primary, muted-red danger */
+.pixel-btn {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 15px;
+  padding: 7px 14px;
+  border: 2px solid var(--color-c2);
+  background: var(--color-c1);
+  color: var(--color-c3);
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  transition: none;
 }
+.pixel-btn:hover { background: var(--color-c2); border-color: var(--color-c3); }
+.pixel-btn:active { transform: translate(1px, 1px); }
+.pixel-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.pixel-btn-primary {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-c0);
+}
+.pixel-btn-primary:hover { background: var(--color-c3); border-color: var(--color-c3); color: var(--color-c0); }
+.pixel-btn-primary:disabled {
+  background: var(--color-c1);
+  border-color: var(--color-c2);
+  color: var(--color-c3);
+}
+.pixel-btn-danger {
+  background: var(--color-c1);
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+.pixel-btn-danger:hover {
+  background: var(--color-danger);
+  color: var(--color-c0);
+}
+
+/* chunky pixel input — 2px border, pops to amber on focus */
+.pixel-input {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  padding: 11px 14px;
+  border: 2px solid var(--color-c2);
+  background: var(--color-c0);
+  color: var(--color-c3);
+  outline: none;
+  resize: none;
+}
+.pixel-input:focus { border-color: var(--color-accent); }
+.pixel-input::placeholder { color: color-mix(in srgb, var(--color-c3) 35%, transparent); }
+
+/* pixel status dot with inset shadow for 8-bit depth */
+.pixel-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+  box-shadow: inset -2px -2px 0 rgba(0,0,0,0.35);
+}
+
+.repo-banner:hover { color: var(--color-accent) !important; background: var(--color-c1) !important; }
+
+/* blink — honest 8-bit step timing */
+@keyframes pixel-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0.3; }
+}
+.pixel-blink { animation: pixel-blink 0.7s steps(1) infinite; }
+
+/* markdown rendering — same warm palette, amber only on emphasis */
+.md { line-height: 1.55; word-wrap: break-word; font-size: 16px; }
+.md p { margin: 0 0 0.8em; }
+.md p:last-child { margin-bottom: 0; }
+.md h1, .md h2, .md h3, .md h4 {
+  margin: 0.9em 0 0.4em;
+  font-weight: bold;
+  color: var(--color-c3);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.md h1 { font-size: 1.35em; color: var(--color-accent); }
+.md h2 { font-size: 1.15em; }
+.md h3 { font-size: 1.02em; }
+.md ul, .md ol { margin: 0 0 0.8em; padding-left: 1.5em; }
+.md li { margin: 0.2em 0; }
+.md li::marker { color: var(--color-accent); }
+.md code {
+  background: var(--color-c1);
+  border: 1px solid var(--color-c2);
+  padding: 0.05em 0.4em;
+  font-size: 0.95em;
+  color: var(--color-accent);
+}
+.md pre {
+  background: var(--color-c1);
+  border: 2px solid var(--color-c2);
+  padding: 12px;
+  margin: 0.8em 0;
+  overflow-x: auto;
+}
+.md pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.95em;
+  color: var(--color-c3);
+}
+.md blockquote {
+  border-left: 3px solid var(--color-accent);
+  margin: 0.8em 0;
+  padding: 0.3em 1em;
+  color: color-mix(in srgb, var(--color-c3) 60%, transparent);
+  background: var(--color-c1);
+}
+.md hr {
+  border: none;
+  border-top: 2px solid var(--color-c2);
+  margin: 1em 0;
+}
+.md a { color: var(--color-accent); text-decoration: underline; }
+.md strong { color: var(--color-c3); }
+.md em { color: var(--color-accent); font-style: normal; }
+.md table { border-collapse: collapse; margin: 0.8em 0; }
+.md th, .md td {
+  border: 1px solid var(--color-c2);
+  padding: 0.4em 0.8em;
+}
+.md th { background: var(--color-c1); color: var(--color-accent); text-transform: uppercase; }
