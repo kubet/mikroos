@@ -120,10 +120,18 @@ async function load(engine: string, modelId: string, dtype?: string, wasmDtype?:
       try {
         await loadWebLLM(modelId, myId);
       } catch (e: any) {
-        const msg = e?.message || "";
-        if (msg.includes("Cache") || msg.includes("caches") || msg.includes("network") || msg.includes("Network"))
-          throw new Error("Browser blocked model download (caching restriction). Try Bonsai 1.7B or use Chrome desktop.");
-        throw e;
+        // Surface the real error — don't swallow it behind a canned message.
+        // Common prod causes: missing COOP/COEP headers (no SharedArrayBuffer),
+        // storage quota, ad/tracker blockers, private browsing.
+        console.error("[MikroOS] webllm load error:", e);
+        const raw = e?.message || String(e);
+        const hint =
+          raw.match(/cache|caches/i) ? "cache storage unavailable (private mode or blocker?)"
+          : raw.match(/quota|storage/i) ? "browser storage quota exceeded"
+          : raw.match(/network|fetch|cors/i) ? "network/CORS (model fetch blocked — check extensions)"
+          : raw.match(/webgpu|adapter|gpu/i) ? "WebGPU unavailable — try Chrome/Edge desktop"
+          : null;
+        throw new Error(hint ? `${hint} · ${raw}` : raw);
       }
     } else {
       await loadTransformers(modelId, dtype || "q4", wasmDtype, myId);
@@ -132,8 +140,8 @@ async function load(engine: string, modelId: string, dtype?: string, wasmDtype?:
     if (loadId !== myId) return;
     mlcEngine = null; tfEngine = null; activeEngine = null; currentModel = "";
     const msg = e?.message || String(e);
-    console.error("[mikro] load failed:", msg);
-    post({ type: "error", message: msg.slice(0, 150) });
+    console.error("[MikroOS] load failed:", msg);
+    post({ type: "error", message: msg.slice(0, 280) });
   }
 }
 
