@@ -13,6 +13,9 @@
   </p>
 
   <p><a href="https://mikroos.com"><strong>mikroos.com</strong></a></p>
+
+  <br/>
+  <img src="public/demo.gif" alt="MikroOS demo" width="760" />
 </div>
 
 ---
