@@ -44,6 +44,7 @@
     "@mlc-ai/web-llm": "^0.2.82",
     "@mozilla/readability": "^0.6.0",
     "@tailwindcss/vite": "^4.2.2",
+    "@vercel/analytics": "^2.0.1",
     "marked": "^18.0.0",
     "solid-js": "^1.9.12",
     "tailwindcss": "^4.2.2"
